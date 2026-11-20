@@ -90,6 +90,26 @@ import { CubeRenderer } from './cube3d.js';
   var allLines = [];
   var RENDER_CAP = 3000;
 
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /**
+   * Many Android BLE stacks silently stall (never resolve, never reject) if
+   * GATT operations are issued back-to-back with no breathing room. Wrap
+   * such calls so a stall becomes a visible, labeled timeout instead of
+   * dead silence.
+   */
+  function withTimeout(promise, ms, label) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error('Timed out after ' + ms + 'ms waiting for: ' + label + ' (the native BLE stack likely stalled)'));
+      }, ms);
+      promise.then(
+        function (v) { clearTimeout(timer); resolve(v); },
+        function (e) { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
   function pad2(n) { return n < 10 ? '0' + n : '' + n; }
   function pad3(n) { return n < 10 ? '00' + n : n < 100 ? '0' + n : '' + n; }
 
@@ -326,7 +346,7 @@ import { CubeRenderer } from './cube3d.js';
     sendCommandMessage: async function (msg) {
       if (!state.commandChar || !state.keyIv) return;
       var encrypted = encryptPayload(msg, state.keyIv);
-      return state.commandChar.writeValue(encrypted);
+      return withTimeout(state.commandChar.writeValue(encrypted), 8000, 'commandChar.writeValue()');
     },
     disconnect: async function () {
       return disconnect();
@@ -428,12 +448,14 @@ import { CubeRenderer } from './cube3d.js';
       state.mac = mac;
 
       log('Connecting GATT…');
-      var gatt = await device.gatt.connect();
+      var gatt = await withTimeout(device.gatt.connect(), 15000, 'device.gatt.connect()');
       state.gatt = gatt;
       log('GATT connected.', 'ok');
+      await sleep(300); // give the native BLE stack a moment before the next GATT op (Android stability)
 
-      var services = await gatt.getPrimaryServices();
+      var services = await withTimeout(gatt.getPrimaryServices(), 15000, 'gatt.getPrimaryServices()');
       log('Primary services found (' + services.length + '): ' + services.map(function (s) { return s.uuid; }).join(', '));
+      await sleep(300);
 
       var match = null;
       for (var i = 0; i < services.length; i++) {
@@ -447,10 +469,12 @@ import { CubeRenderer } from './cube3d.js';
 
       log('Matched protocol: ' + match.def.name + ' (service ' + match.def.service + ')', 'ok');
 
-      var stateChar = await match.service.getCharacteristic(match.def.state);
+      var stateChar = await withTimeout(match.service.getCharacteristic(match.def.state), 15000, 'getCharacteristic(state)');
+      await sleep(300);
       var commandChar = null;
-      try { commandChar = await match.service.getCharacteristic(match.def.command); }
+      try { commandChar = await withTimeout(match.service.getCharacteristic(match.def.command), 15000, 'getCharacteristic(command)'); }
       catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
+      await sleep(300);
 
       state.stateChar = stateChar;
       state.commandChar = commandChar;
@@ -479,15 +503,25 @@ import { CubeRenderer } from './cube3d.js';
 
       state.notifyCount = 0;
       stateChar.addEventListener('characteristicvaluechanged', onNotification);
-      await stateChar.startNotifications();
+      log('Enabling notifications on state characteristic…');
+      try {
+        await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications()');
+      } catch (e) {
+        log('startNotifications() stalled/failed first try (' + (e && e.message ? e.message : e) + '), retrying once after a short delay…', 'warn');
+        await sleep(500);
+        await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications() [retry]');
+      }
       log('startNotifications() succeeded on state characteristic. Now turn a face on the cube — every notification received will be logged below.', 'ok');
 
       setStatus('Connected (' + match.def.name + ')', 'connected');
       disconnectBtn.disabled = false;
 
       if (state.keyIv && commandChar) {
+        await sleep(300);
         await sendCubeCommand('REQUEST_HARDWARE');
+        await sleep(300);
         await sendCubeCommand('REQUEST_FACELETS');
+        await sleep(300);
         await sendCubeCommand('REQUEST_BATTERY');
       }
     } catch (err) {
