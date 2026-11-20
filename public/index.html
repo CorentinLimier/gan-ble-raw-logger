@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>GAN Cube Raw BLE Logger</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>GAN Cube Raw BLE Logger</h1>
+  <p class="subtitle">Minimal, dependency-free Web Bluetooth notification logger — does <strong>not</strong> use gan-web-bluetooth. Built to check whether BLE notifications from the cube actually arrive on this device/browser.</p>
+</header>
+
+<section id="env-panel" class="panel">
+  <h2>Environment</h2>
+  <div id="env-info" class="mono small"></div>
+</section>
+
+<section id="controls" class="panel">
+  <h2>Connection</h2>
+  <div class="status-row">
+    <span id="status-badge" class="badge badge-disconnected">Disconnected</span>
+    <span id="device-info" class="mono small"></span>
+  </div>
+  <div class="button-row">
+    <button id="connect-btn">Connect to cube</button>
+    <button id="disconnect-btn" disabled>Disconnect</button>
+  </div>
+  <label class="checkbox-row">
+    <input type="checkbox" id="decrypt-toggle" checked>
+    Attempt AES decryption of notification payloads (needs cube MAC address, obtained automatically if the browser supports <code>watchAdvertisements()</code>)
+  </label>
+  <label class="checkbox-row">
+    <span>Manual MAC fallback (AA:BB:CC:DD:EE:FF), used only if auto-detect fails:</span>
+  </label>
+  <div class="button-row">
+    <input type="text" id="manual-mac" placeholder="AA:BB:CC:DD:EE:FF" class="mono">
+  </div>
+</section>
+
+<section id="log-panel" class="panel">
+  <div class="log-header">
+    <h2>Log <span id="log-count" class="mono small"></span></h2>
+    <div class="button-row">
+      <button id="copy-btn">Copy</button>
+      <button id="download-btn">Download .txt</button>
+      <button id="clear-btn">Clear</button>
+      <label class="checkbox-row inline"><input type="checkbox" id="autoscroll-toggle" checked> autoscroll</label>
+    </div>
+  </div>
+  <pre id="log" class="mono"></pre>
+</section>
+
+<script src="vendor/aes-js.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
