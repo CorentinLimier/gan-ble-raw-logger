@@ -1,21 +1,22 @@
 /**
- * GAN Cube Raw BLE Logger
+ * GAN Cube BLE Logger
  *
- * Standalone, dependency-free (besides vendored aes-js) Web Bluetooth client
- * built to answer one question: do BLE notifications from a GAN smart cube
- * actually arrive in this browser, on this device, when the cube connects
- * and when faces are turned?
+ * Standalone Web Bluetooth client built to answer two questions:
+ *  1. Do BLE notifications from a GAN smart cube actually arrive in this
+ *     browser, on this device, when it connects and when faces are turned?
+ *  2. Once decoded (moves + facelet state + gyro), does the resulting cube
+ *     state/orientation match what's physically happening to the cube?
  *
- * It deliberately does NOT reuse gan-web-bluetooth, so it can act as an
- * independent cross-check. It only *listens* — it never writes commands to
- * the cube, to keep the surface area for bugs as small as possible.
- *
- * Protocol constants below (service/characteristic UUIDs, encryption keys,
- * MAC extraction from manufacturer data, salting scheme) are public
- * knowledge of the GAN BLE protocol, reproduced from the upstream
- * afedotov/gan-web-bluetooth project (MIT) purely for interoperability with
- * your own hardware.
+ * It deliberately does NOT reuse gan-web-bluetooth — protocol.js is an
+ * independent vanilla-JS port of the public GAN BLE protocol (service/
+ * characteristic UUIDs, encryption, bit-level event decoding), so this page
+ * can act as a cross-check against a connectivity issue that reproduces on
+ * phone but not on desktop. It never writes moves/alg data to the cube,
+ * only the commands needed to read state (hardware/facelets/battery) and
+ * the explicit "reset to solved" command behind the Reset Cube button.
  */
+
+import { CubeRenderer } from './cube3d.js';
 
 (function () {
   'use strict';
@@ -37,12 +38,11 @@
   var GEN4_STATE_CHAR = '0000fff6-0000-1000-8000-00805f9b34fb';
 
   var GEN_SERVICES = [
-    { service: GEN2_SERVICE, command: GEN2_COMMAND_CHAR, state: GEN2_STATE_CHAR, name: 'Gen2' },
-    { service: GEN3_SERVICE, command: GEN3_COMMAND_CHAR, state: GEN3_STATE_CHAR, name: 'Gen3' },
-    { service: GEN4_SERVICE, command: GEN4_COMMAND_CHAR, state: GEN4_STATE_CHAR, name: 'Gen4' }
+    { service: GEN2_SERVICE, command: GEN2_COMMAND_CHAR, state: GEN2_STATE_CHAR, name: 'Gen2', Driver: window.GanProtocol.GanGen2ProtocolDriver },
+    { service: GEN3_SERVICE, command: GEN3_COMMAND_CHAR, state: GEN3_STATE_CHAR, name: 'Gen3', Driver: window.GanProtocol.GanGen3ProtocolDriver },
+    { service: GEN4_SERVICE, command: GEN4_COMMAND_CHAR, state: GEN4_STATE_CHAR, name: 'Gen4', Driver: window.GanProtocol.GanGen4ProtocolDriver }
   ];
 
-  // All known Company Identifier Codes GAN cubes may use in manufacturer data
   var CIC_LIST = [];
   for (var i = 0; i < 256; i++) CIC_LIST.push((i << 8) | 0x01);
 
@@ -75,8 +75,19 @@
   var decryptToggle = $('decrypt-toggle');
   var autoscrollToggle = $('autoscroll-toggle');
   var manualMacInput = $('manual-mac');
+  var resetGyroBtn = $('reset-gyro-btn');
+  var resetCubeBtn = $('reset-cube-btn');
 
-  var allLines = []; // full history, independent of DOM render cap
+  var infoHardware = $('info-hardware');
+  var infoHwVersion = $('info-hw-version');
+  var infoSwVersion = $('info-sw-version');
+  var infoProdDate = $('info-prod-date');
+  var infoGyroSupported = $('info-gyro-supported');
+  var infoBattery = $('info-battery');
+  var infoMoveCount = $('info-move-count');
+  var infoQuaternion = $('info-quaternion');
+
+  var allLines = [];
   var RENDER_CAP = 3000;
 
   function pad2(n) { return n < 10 ? '0' + n : '' + n; }
@@ -110,9 +121,7 @@
 
   function bytesToHex(bytes) {
     var out = [];
-    for (var i = 0; i < bytes.length; i++) {
-      out.push(bytes[i].toString(16).toUpperCase().padStart(2, '0'));
-    }
+    for (var i = 0; i < bytes.length; i++) out.push(bytes[i].toString(16).toUpperCase().padStart(2, '0'));
     return out.join(' ');
   }
 
@@ -121,8 +130,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Environment diagnostics (printed once on load — this is exactly the
-  // kind of info normally only visible in a desktop devtools console)
+  // Environment diagnostics
   // ---------------------------------------------------------------------
 
   function printEnvInfo() {
@@ -132,8 +140,7 @@
     lines.push('Page origin: ' + location.origin + ' (protocol: ' + location.protocol + ')');
     lines.push('navigator.bluetooth available: ' + (!!navigator.bluetooth));
     lines.push('watchAdvertisements supported: ' + (typeof BluetoothDevice !== 'undefined' && !!BluetoothDevice.prototype && typeof BluetoothDevice.prototype.watchAdvertisements === 'function'));
-    envInfoEl.innerHTML = lines.map(function (l) { return escapeHtml(l); }).join('<br>');
-
+    envInfoEl.innerHTML = lines.map(escapeHtml).join('<br>');
     log('Environment: ' + lines.join(' | '));
 
     if (!navigator.bluetooth) {
@@ -146,9 +153,7 @@
     if (navigator.bluetooth.getAvailability) {
       navigator.bluetooth.getAvailability().then(function (avail) {
         log('navigator.bluetooth.getAvailability() = ' + avail + (avail ? '' : '  <-- Bluetooth adapter looks unavailable/off on this device'), avail ? undefined : 'warn');
-      }).catch(function (e) {
-        log('getAvailability() failed: ' + e, 'warn');
-      });
+      }).catch(function (e) { log('getAvailability() failed: ' + e, 'warn'); });
     }
   }
 
@@ -159,12 +164,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // Manufacturer data / MAC extraction (mirrors gan-web-bluetooth's logic)
+  // Manufacturer data / MAC extraction
   // ---------------------------------------------------------------------
 
   function getManufacturerDataBytes(manufacturerData) {
     if (manufacturerData instanceof DataView) {
-      // Some browsers (e.g. Bluefy) hand back a raw DataView directly
       return new DataView(manufacturerData.buffer.slice(2, 11));
     }
     for (var idx = 0; idx < CIC_LIST.length; idx++) {
@@ -181,9 +185,7 @@
     var dv = getManufacturerDataBytes(manufacturerData);
     if (!dv || dv.byteLength < 6) return null;
     var mac = [];
-    for (var i = 1; i <= 6; i++) {
-      mac.push(dv.getUint8(dv.byteLength - i).toString(16).toUpperCase().padStart(2, '0'));
-    }
+    for (var i = 1; i <= 6; i++) mac.push(dv.getUint8(dv.byteLength - i).toString(16).toUpperCase().padStart(2, '0'));
     return mac.join(':');
   }
 
@@ -209,9 +211,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // AES decryption (uses vendored aes-js, same scheme as gan-web-bluetooth:
-  // AES-128-CBC, key/iv salted with reversed MAC bytes, only the first and
-  // last 16-byte chunk of the payload are encrypted)
+  // AES encryption/decryption (matches gan-web-bluetooth's scheme: AES-128
+  // CBC, key/iv salted with reversed MAC bytes, only the first and last
+  // 16-byte chunk of the payload are (en/de)crypted, each as an
+  // independent CBC block using a fresh cipher keyed only by key/iv)
   // ---------------------------------------------------------------------
 
   function buildEncrypter(keyDef, salt) {
@@ -229,12 +232,22 @@
     var res = new Uint8Array(bytes);
     if (res.length > 16) {
       var cipher1 = new window.aesjs.ModeOfOperation.cbc(keyIv.key, keyIv.iv);
-      var tail = cipher1.decrypt(res.subarray(res.length - 16, res.length));
-      res.set(tail, res.length - 16);
+      res.set(cipher1.decrypt(res.subarray(res.length - 16, res.length)), res.length - 16);
     }
     var cipher2 = new window.aesjs.ModeOfOperation.cbc(keyIv.key, keyIv.iv);
-    var head = cipher2.decrypt(res.subarray(0, 16));
-    res.set(head, 0);
+    res.set(cipher2.decrypt(res.subarray(0, 16)), 0);
+    return res;
+  }
+
+  function encryptPayload(bytes, keyIv) {
+    if (bytes.length < 16) throw new Error('payload shorter than 16 bytes, cannot encrypt');
+    var res = new Uint8Array(bytes);
+    var cipher1 = new window.aesjs.ModeOfOperation.cbc(keyIv.key, keyIv.iv);
+    res.set(cipher1.encrypt(res.subarray(0, 16)), 0);
+    if (res.length > 16) {
+      var cipher2 = new window.aesjs.ModeOfOperation.cbc(keyIv.key, keyIv.iv);
+      res.set(cipher2.encrypt(res.subarray(res.length - 16, res.length)), res.length - 16);
+    }
     return res;
   }
 
@@ -254,10 +267,14 @@
     stateChar: null,
     commandChar: null,
     gen: null,
+    driver: null,
     mac: null,
     keyIv: null,
     advAbort: null,
-    notifyCount: 0
+    notifyCount: 0,
+    moveCount: 0,
+    cubeState: window.GanProtocol.solvedState(),
+    cubeStateSynced: false
   };
 
   function resetUi() {
@@ -265,6 +282,7 @@
     deviceInfoEl.textContent = '';
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
+    resetCubeBtn.disabled = true;
   }
 
   async function tryAutoRetrieveMac(device, timeoutMs) {
@@ -299,6 +317,82 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Raw connection adapter handed to the protocol driver (used for move
+  // history recovery requests and cube-initiated disconnect commands)
+  // ---------------------------------------------------------------------
+
+  var rawConn = {
+    sendCommandMessage: async function (msg) {
+      if (!state.commandChar || !state.keyIv) return;
+      var encrypted = encryptPayload(msg, state.keyIv);
+      return state.commandChar.writeValue(encrypted);
+    },
+    disconnect: async function () {
+      return disconnect();
+    }
+  };
+
+  async function sendCubeCommand(type) {
+    if (!state.driver) { log('Cannot send ' + type + ': not connected.', 'warn'); return; }
+    if (!state.keyIv) { log('Cannot send ' + type + ': no encryption key (MAC unavailable).', 'warn'); return; }
+    if (!state.commandChar) { log('Cannot send ' + type + ': command characteristic unavailable.', 'warn'); return; }
+    var msg = state.driver.createCommandMessage(type);
+    if (!msg) { log('Driver for ' + state.gen + ' does not support ' + type, 'warn'); return; }
+    try {
+      await rawConn.sendCommandMessage(msg);
+      log('Sent command ' + type, 'ok');
+    } catch (e) {
+      log('Failed to send command ' + type + ': ' + e, 'error');
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Decoded cube event handling
+  // ---------------------------------------------------------------------
+
+  function redrawCube() {
+    var facelets = window.GanProtocol.toKociembaFacelets(state.cubeState.cp, state.cubeState.co, state.cubeState.ep, state.cubeState.eo);
+    CubeRenderer.setFacelets(facelets);
+    return facelets;
+  }
+
+  function onCubeEvent(event) {
+    if (event.type === 'MOVE') {
+      state.moveCount++;
+      infoMoveCount.textContent = String(state.moveCount);
+      if (state.cubeStateSynced) {
+        window.GanProtocol.applyMove(state.cubeState, event.face, event.direction);
+        var facelets = redrawCube();
+        log('MOVE #' + state.moveCount + ' serial=' + event.serial + ' move=' + event.move + ' cubeTs=' + event.cubeTimestamp + ' -> ' + facelets, 'move');
+      } else {
+        log('MOVE move=' + event.move + ' serial=' + event.serial + ' (waiting for first FACELETS sync before applying to local state)', 'move');
+      }
+    } else if (event.type === 'FACELETS') {
+      state.cubeState = { cp: event.state.CP.slice(), co: event.state.CO.slice(), ep: event.state.EP.slice(), eo: event.state.EO.slice() };
+      state.cubeStateSynced = true;
+      var facelets = redrawCube();
+      log('FACELETS sync serial=' + event.serial + ': ' + facelets, 'facelets');
+    } else if (event.type === 'GYRO') {
+      CubeRenderer.handleGyroEvent(event.quaternion);
+      infoQuaternion.textContent = 'x:' + event.quaternion.x.toFixed(2) + ' y:' + event.quaternion.y.toFixed(2) + ' z:' + event.quaternion.z.toFixed(2) + ' w:' + event.quaternion.w.toFixed(2);
+    } else if (event.type === 'HARDWARE') {
+      infoHardware.textContent = event.hardwareName || '-';
+      infoHwVersion.textContent = event.hardwareVersion || '-';
+      infoSwVersion.textContent = event.softwareVersion || '-';
+      infoProdDate.textContent = event.productDate || '-';
+      infoGyroSupported.textContent = event.gyroSupported ? 'yes' : 'no';
+      log('HARDWARE: name=' + event.hardwareName + ' hw=' + event.hardwareVersion + ' sw=' + event.softwareVersion + ' date=' + event.productDate + ' gyro=' + event.gyroSupported, 'ok');
+    } else if (event.type === 'BATTERY') {
+      infoBattery.textContent = event.batteryLevel + '%';
+      log('BATTERY: ' + event.batteryLevel + '%', 'ok');
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Connect / disconnect
+  // ---------------------------------------------------------------------
+
   async function connect() {
     try {
       connectBtn.disabled = true;
@@ -306,11 +400,7 @@
       log('Requesting device (filters: namePrefix GAN / MG / AiCube)…');
 
       var device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { namePrefix: 'GAN' },
-          { namePrefix: 'MG' },
-          { namePrefix: 'AiCube' }
-        ],
+        filters: [{ namePrefix: 'GAN' }, { namePrefix: 'MG' }, { namePrefix: 'AiCube' }],
         optionalServices: [GEN2_SERVICE, GEN3_SERVICE, GEN4_SERVICE],
         optionalManufacturerData: CIC_LIST
       });
@@ -321,9 +411,7 @@
 
       device.addEventListener('gattserverdisconnected', function () {
         log('gattserverdisconnected event fired (cube/phone dropped the connection)', 'warn');
-        setStatus('Disconnected', 'disconnected');
-        connectBtn.disabled = false;
-        disconnectBtn.disabled = true;
+        resetUi();
       });
 
       log('Attempting automatic MAC retrieval via watchAdvertisements() (up to 10s)…');
@@ -334,7 +422,7 @@
           mac = manual;
           log('Using manually entered MAC: ' + mac);
         } else {
-          log('No MAC available — decryption will be skipped, raw notification bytes will still be logged.', 'warn');
+          log('No MAC available — decryption/decoding/3D view will be skipped, raw notification bytes will still be logged.', 'warn');
         }
       }
       state.mac = mac;
@@ -351,31 +439,28 @@
       for (var i = 0; i < services.length; i++) {
         var uuid = services[i].uuid.toLowerCase();
         for (var j = 0; j < GEN_SERVICES.length; j++) {
-          if (uuid === GEN_SERVICES[j].service) {
-            match = { service: services[i], def: GEN_SERVICES[j] };
-            break;
-          }
+          if (uuid === GEN_SERVICES[j].service) { match = { service: services[i], def: GEN_SERVICES[j] }; break; }
         }
         if (match) break;
       }
-
-      if (!match) {
-        throw new Error('None of the known GAN service UUIDs (Gen2/Gen3/Gen4) were found among the primary services. This cube/firmware may use an unrecognized protocol variant.');
-      }
+      if (!match) throw new Error('None of the known GAN service UUIDs (Gen2/Gen3/Gen4) were found among the primary services. This cube/firmware may use an unrecognized protocol variant.');
 
       log('Matched protocol: ' + match.def.name + ' (service ' + match.def.service + ')', 'ok');
 
       var stateChar = await match.service.getCharacteristic(match.def.state);
       var commandChar = null;
-      try {
-        commandChar = await match.service.getCharacteristic(match.def.command);
-      } catch (e) {
-        log('Could not get command characteristic (not needed for listening): ' + e, 'warn');
-      }
+      try { commandChar = await match.service.getCharacteristic(match.def.command); }
+      catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
 
       state.stateChar = stateChar;
       state.commandChar = commandChar;
       state.gen = match.def.name;
+      state.driver = new match.def.Driver();
+      state.moveCount = 0;
+      state.cubeState = window.GanProtocol.solvedState();
+      state.cubeStateSynced = false;
+      infoMoveCount.textContent = '0';
+      CubeRenderer.setFacelets(null);
 
       log('State characteristic properties: ' + JSON.stringify(stateChar.properties));
       if (commandChar) log('Command characteristic properties: ' + JSON.stringify(commandChar.properties));
@@ -385,7 +470,8 @@
         if (salt) {
           var keyDef = (device.name && device.name.indexOf('AiCube') === 0) ? ENCRYPTION_KEYS[1] : ENCRYPTION_KEYS[0];
           state.keyIv = buildEncrypter(keyDef, salt);
-          log('Encryption key/iv derived from MAC salt. Decryption ' + (decryptToggle.checked ? 'enabled' : 'disabled (checkbox off)') + '.');
+          log('Encryption key/iv derived from MAC salt. Decoding ' + (decryptToggle.checked ? 'enabled' : 'disabled (checkbox off)') + '.');
+          resetCubeBtn.disabled = false;
         } else {
           log('MAC "' + mac + '" is not a valid 6-byte MAC address, ignoring it.', 'warn');
         }
@@ -398,6 +484,12 @@
 
       setStatus('Connected (' + match.def.name + ')', 'connected');
       disconnectBtn.disabled = false;
+
+      if (state.keyIv && commandChar) {
+        await sendCubeCommand('REQUEST_HARDWARE');
+        await sendCubeCommand('REQUEST_FACELETS');
+        await sendCubeCommand('REQUEST_BATTERY');
+      }
     } catch (err) {
       log('ERROR during connect: ' + (err && err.message ? err.message : err), 'error');
       if (err && err.stack) log('stack: ' + err.stack, 'error');
@@ -406,26 +498,33 @@
     }
   }
 
-  function onNotification(evt) {
+  async function onNotification(evt) {
     state.notifyCount++;
     var bytes = dataViewToBytes(evt.target.value);
     log('notification #' + state.notifyCount + ' (' + bytes.length + ' bytes) raw: ' + bytesToHex(bytes), 'evt');
 
-    if (decryptToggle.checked && state.keyIv) {
-      try {
-        var decrypted = decryptPayload(bytes, state.keyIv);
-        log('  decrypted: ' + bytesToHex(decrypted));
-      } catch (e) {
-        log('  decryption failed: ' + e, 'warn');
-      }
+    if (!decryptToggle.checked || !state.keyIv) return;
+
+    var decrypted;
+    try {
+      decrypted = decryptPayload(bytes, state.keyIv);
+      log('  decrypted: ' + bytesToHex(decrypted));
+    } catch (e) {
+      log('  decryption failed: ' + e, 'warn');
+      return;
+    }
+
+    try {
+      var events = await state.driver.handleStateEvent(rawConn, decrypted);
+      events.forEach(onCubeEvent);
+    } catch (e) {
+      log('  protocol decode failed: ' + (e && e.message ? e.message : e), 'warn');
     }
   }
 
   async function disconnect() {
     try {
-      if (state.advAbort) {
-        try { state.advAbort.abort(); } catch (e) {}
-      }
+      if (state.advAbort) { try { state.advAbort.abort(); } catch (e) {} }
       if (state.stateChar) {
         try { await state.stateChar.stopNotifications(); } catch (e) {}
         state.stateChar.removeEventListener('characteristicvaluechanged', onNotification);
@@ -441,6 +540,7 @@
       state.gatt = null;
       state.stateChar = null;
       state.commandChar = null;
+      state.driver = null;
       state.keyIv = null;
       resetUi();
     }
@@ -452,6 +552,19 @@
 
   connectBtn.addEventListener('click', connect);
   disconnectBtn.addEventListener('click', disconnect);
+
+  resetGyroBtn.addEventListener('click', function () {
+    CubeRenderer.resetGyro();
+    log('Gyro orientation reference reset (client-side only, no command sent to cube).', 'ok');
+  });
+
+  resetCubeBtn.addEventListener('click', async function () {
+    await sendCubeCommand('REQUEST_RESET');
+    state.cubeState = window.GanProtocol.solvedState();
+    state.cubeStateSynced = true;
+    redrawCube();
+    log('Local display reset to solved. Cube hardware was told to treat its CURRENT physical position as solved — only press this when the cube is actually solved in your hands.', 'ok');
+  });
 
   clearBtn.addEventListener('click', function () {
     allLines = [];
@@ -482,6 +595,7 @@
     URL.revokeObjectURL(url);
   });
 
+  CubeRenderer.init($('cube3d-container'));
   printEnvInfo();
   resetUi();
   log('Ready. Tap "Connect to cube" and select your GAN cube from the browser\'s device picker.');

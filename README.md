@@ -1,20 +1,25 @@
 # gan-ble-raw-logger
 
-A minimal, dependency-free Web Bluetooth page whose only job is to answer
-one question: **do BLE notifications from a GAN smart cube actually reach
-this browser, on this device, when it connects and when faces are turned?**
+A dependency-free (beyond two vendored, offline-bundled libraries) Web
+Bluetooth page built to answer two questions: **do BLE notifications from a
+GAN smart cube actually reach this browser, on this device, when it
+connects and when faces are turned — and once decoded, does the resulting
+move/state/orientation match what's physically happening to the cube?**
 
 It intentionally does **not** use [`gan-web-bluetooth`](https://github.com/afedotov/gan-web-bluetooth) —
-it's a from-scratch, independent client, so it can act as a cross-check
+it's a from-scratch, independent client (`protocol.js` is a vanilla-JS port
+of the same public GAN BLE protocol), so it can act as a cross-check
 against a GAN12 UI connectivity issue that reproduces on phone (Chrome +
 official aCube/CubeStation app) but not on desktop.
 
 It connects, logs every raw BLE notification byte-for-byte with a
-timestamp, and (if it can determine the cube's MAC address) also attempts
-AES decryption, straight on the page — because on a phone you usually can't
-get to `chrome://inspect` or a console to see what's happening.
+timestamp, decodes moves/facelet-state/gyro/hardware/battery from the
+decrypted payload, renders the decoded cube live as a small 3D sticker
+cube, and prints all of this straight on the page — because on a phone you
+usually can't get to `chrome://inspect` or a console to see what's
+happening.
 
-## What it logs
+## What it does
 
 - Environment info on load: user agent, whether `navigator.bluetooth`
   exists, whether `watchAdvertisements()` is supported, Bluetooth adapter
@@ -27,13 +32,26 @@ get to `chrome://inspect` or a console to see what's happening.
   which GAN protocol generation (Gen2/Gen3/Gen4) matched, and the
   characteristic properties.
 - Every single `characteristicvaluechanged` notification: sequence number,
-  byte length, and the full raw hex payload — plus a decrypted hex payload
-  if a MAC/key was available and the decrypt checkbox is on.
+  byte length, and the full raw hex payload, plus the decrypted hex payload
+  when a MAC/key is available.
+- Decoded `MOVE` / `FACELETS` / `GYRO` / `HARDWARE` / `BATTERY` events
+  (including Gen3/Gen4 missed-move history recovery), replayed locally with
+  the standard Kociemba cubie move tables and rendered live as a 3D sticker
+  cube (Three.js), with the cube's own orientation applied from the
+  gyroscope where supported.
+- **Reset gyro** button: recalibrates the on-screen orientation reference
+  to the cube's current physical orientation (client-side only, no command
+  sent to the cube — press it after picking the cube up in a comfortable
+  resting orientation).
+- **Reset cube (set solved)** button: sends the GAN "treat current position
+  as solved" command to the cube's firmware and resets the local display to
+  solved — only press it when the physical cube is actually solved.
 - `gattserverdisconnected` events, and any error with its message/stack.
 
-It never writes anything to the cube (no commands sent) — it is read-only,
-to keep the surface for bugs as small as possible while isolating whether
-the *notification path* works.
+It only ever writes the read/calibration commands above (hardware info,
+facelets state, battery, reset-to-solved) — never move or algorithm data —
+to keep the surface for bugs small while isolating whether the
+*notification and decoding path* works.
 
 ## Using it
 
@@ -71,12 +89,21 @@ deploy automatically on every push.
 
 ## Protocol reference
 
-The service/characteristic UUIDs, manufacturer-data MAC extraction, and
-AES-128-CBC salting scheme in `public/app.js` are public knowledge of the
-GAN BLE protocol, reproduced from the upstream MIT-licensed
+The service/characteristic UUIDs, manufacturer-data MAC extraction,
+AES-128-CBC salting scheme, and the bit-level Gen2/Gen3/Gen4 event decoders
+in `public/protocol.js` are public knowledge of the GAN BLE protocol,
+reproduced from the upstream MIT-licensed
 [`afedotov/gan-web-bluetooth`](https://github.com/afedotov/gan-web-bluetooth)
 project purely for interoperability with GAN-branded hardware you own.
+Move replay uses the standard cubie-level move tables from the public
+Kociemba two-phase solver (same cubie numbering convention); the
+conversion to Kociemba facelets notation is cross-checked against
+gan-web-bluetooth's own documented example.
+
 AES primitives come from the vendored, unmodified
 [`aes-js`](https://github.com/ricmoo/aes-js) (MIT, see
-`public/vendor/aes-js.LICENSE.txt`) so the page works fully offline with no
-CDN dependency — one less variable when debugging a mobile-only issue.
+`public/vendor/aes-js.LICENSE.txt`); the 3D cube view is rendered with a
+vendored, bundled-and-minified build of [`three.js`](https://github.com/mrdoob/three.js)
+(MIT, see `public/vendor/three.LICENSE.txt`) — both vendored locally so the
+page works fully offline with no CDN dependency, one less variable when
+debugging a mobile-only issue.

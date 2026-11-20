@@ -155,6 +155,52 @@ button:disabled {
   margin: 0;
 }
 
+.cube-layout {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.cube3d-container {
+  width: 220px;
+  max-width: 45vw;
+  aspect-ratio: 1 / 1;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: radial-gradient(circle at 50% 35%, #1d2230, #0a0c10);
+}
+
+.cube3d-container canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.cube-info {
+  flex: 1;
+  min-width: 200px;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin-bottom: 0.6rem;
+  color: var(--text-dim);
+}
+
+.info-grid span:nth-child(2n) {
+  color: var(--text);
+}
+
+.hint {
+  color: var(--text-dim);
+  margin: 0.5rem 0 0;
+}
+
+.log-line-move { color: #ffe08a; font-weight: 600; }
+.log-line-facelets { color: #9ad1ff; }
 .log-line-error { color: var(--red); }
 .log-line-warn { color: var(--amber); }
 .log-line-ok { color: var(--green); }

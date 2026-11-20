@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>GAN Cube Raw BLE Logger</title>
+<title>GAN Cube BLE Logger</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>GAN Cube Raw BLE Logger</h1>
-  <p class="subtitle">Minimal, dependency-free Web Bluetooth notification logger — does <strong>not</strong> use gan-web-bluetooth. Built to check whether BLE notifications from the cube actually arrive on this device/browser.</p>
+  <h1>GAN Cube BLE Logger</h1>
+  <p class="subtitle">Standalone Web Bluetooth client — does <strong>not</strong> use gan-web-bluetooth. Decodes moves/state from raw notifications and renders them live, to check whether the cube's BLE events arrive correctly on this device/browser.</p>
 </header>
 
 <section id="env-panel" class="panel">
@@ -39,6 +39,30 @@
   </div>
 </section>
 
+<section id="cube-panel" class="panel">
+  <h2>Decoded cube state</h2>
+  <div class="cube-layout">
+    <div id="cube3d-container" class="cube3d-container"></div>
+    <div class="cube-info">
+      <div class="info-grid mono small">
+        <span>Hardware</span><span id="info-hardware">-</span>
+        <span>HW version</span><span id="info-hw-version">-</span>
+        <span>SW version</span><span id="info-sw-version">-</span>
+        <span>Production date</span><span id="info-prod-date">-</span>
+        <span>Gyro supported</span><span id="info-gyro-supported">-</span>
+        <span>Battery</span><span id="info-battery">-</span>
+        <span>Moves decoded</span><span id="info-move-count">0</span>
+        <span>Last quaternion</span><span id="info-quaternion">-</span>
+      </div>
+      <div class="button-row">
+        <button id="reset-gyro-btn">Reset gyro</button>
+        <button id="reset-cube-btn" disabled>Reset cube (set solved)</button>
+      </div>
+      <p class="hint small">Reset gyro just recalibrates the on-screen orientation reference (client-side only). Reset cube sends the GAN "treat current position as solved" command to the cube itself — only do this when the physical cube is actually solved.</p>
+    </div>
+  </div>
+</section>
+
 <section id="log-panel" class="panel">
   <div class="log-header">
     <h2>Log <span id="log-count" class="mono small"></span></h2>
@@ -53,6 +77,7 @@
 </section>
 
 <script src="vendor/aes-js.js"></script>
-<script src="app.js"></script>
+<script src="protocol.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>
