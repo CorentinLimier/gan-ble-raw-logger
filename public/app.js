@@ -149,6 +149,13 @@ import { CubeRenderer } from './cube3d.js';
     return new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
   }
 
+  /** BluetoothCharacteristicProperties fields are prototype getters, so JSON.stringify(properties) always prints "{}" — read them explicitly instead. */
+  function describeCharProperties(props) {
+    if (!props) return '(none)';
+    var names = ['broadcast', 'read', 'writeWithoutResponse', 'write', 'notify', 'indicate', 'authenticatedSignedWrites', 'reliableWrite', 'writableAuxiliaries'];
+    return names.filter(function (n) { return props[n]; }).join(', ') || '(no properties set)';
+  }
+
   // ---------------------------------------------------------------------
   // Environment diagnostics
   // ---------------------------------------------------------------------
@@ -550,8 +557,8 @@ import { CubeRenderer } from './cube3d.js';
     catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
     await sleep(500);
 
-    log('State characteristic properties: ' + JSON.stringify(stateChar.properties));
-    if (commandChar) log('Command characteristic properties: ' + JSON.stringify(commandChar.properties));
+    log('State characteristic properties: ' + describeCharProperties(stateChar.properties));
+    if (commandChar) log('Command characteristic properties: ' + describeCharProperties(commandChar.properties));
 
     state.notifyCount = 0;
     stateChar.addEventListener('characteristicvaluechanged', onNotification);
