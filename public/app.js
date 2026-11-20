@@ -302,7 +302,8 @@ import { CubeRenderer } from './cube3d.js';
     moveCount: 0,
     cubeState: window.GanProtocol.solvedState(),
     cubeStateSynced: false,
-    intentionalDisconnect: false
+    intentionalDisconnect: false,
+    cancelConnect: false
   };
 
   function resetUi() {
@@ -424,6 +425,7 @@ import { CubeRenderer } from './cube3d.js';
   async function connect() {
     try {
       connectBtn.disabled = true;
+      state.cancelConnect = false;
       setStatus('Connecting…', 'connecting');
       log('Requesting device (filters: namePrefix GAN / MG / AiCube)…');
 
@@ -436,6 +438,7 @@ import { CubeRenderer } from './cube3d.js';
       state.device = device;
       log('Device selected: name="' + device.name + '" id=' + device.id, 'ok');
       deviceInfoEl.textContent = device.name + ' (' + device.id + ')';
+      disconnectBtn.disabled = false; // acts as "Cancel" during the connect/retry sequence below
 
       device.addEventListener('gattserverdisconnected', function () {
         if (state.intentionalDisconnect) return; // our own retry/disconnect logic already handles its own state
@@ -463,12 +466,17 @@ import { CubeRenderer } from './cube3d.js';
       }
       state.mac = mac;
 
-      var MAX_ATTEMPTS = 8;
+      var MAX_ATTEMPTS = 25;
       var result = null;
       var lastError = null;
       for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (state.cancelConnect) {
+          log('Connection attempt cancelled.', 'warn');
+          break;
+        }
+        setStatus('Connecting… (attempt ' + attempt + '/' + MAX_ATTEMPTS + ')', 'connecting');
         if (attempt > 1) {
-          log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ': fully tearing down and re-establishing the GATT connection before retrying (a stuck native BLE operation usually needs a fresh connection, not just a retried call)…', 'warn');
+          log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ': fully tearing down and re-establishing the GATT connection before retrying (this device\'s GATT link seems to need a probabilistic number of fresh attempts before it\'s ready to carry real data)…', 'warn');
           state.intentionalDisconnect = true;
           try { if (device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e) {}
           await sleep(1000);
@@ -479,10 +487,14 @@ import { CubeRenderer } from './cube3d.js';
           break;
         } catch (e) {
           lastError = e;
-          log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ' failed: ' + (e && e.message ? e.message : e), 'error');
+          if (!state.cancelConnect) {
+            log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ' failed: ' + (e && e.message ? e.message : e), 'error');
+          }
         }
       }
       if (!result) {
+        // If cancelled, disconnect() already reset the UI (and logged) — just stop here.
+        if (state.cancelConnect) return;
         throw lastError || new Error('Failed to establish GATT session after ' + MAX_ATTEMPTS + ' attempts.');
       }
 
@@ -633,13 +645,19 @@ import { CubeRenderer } from './cube3d.js';
   async function disconnect() {
     try {
       state.intentionalDisconnect = true;
+      state.cancelConnect = true; // stop the connect() retry loop from starting another attempt
       if (state.advAbort) { try { state.advAbort.abort(); } catch (e) {} }
       if (state.stateChar) {
         try { await state.stateChar.stopNotifications(); } catch (e) {}
         state.stateChar.removeEventListener('characteristicvaluechanged', onNotification);
       }
-      if (state.gatt && state.gatt.connected) {
-        state.gatt.disconnect();
+      // state.gatt is only set once connect() fully succeeds; if cancelling mid-retry, fall
+      // back to state.device.gatt so the in-flight connection attempt still gets torn down.
+      var gattToClose = (state.gatt && state.gatt.connected) ? state.gatt
+        : (state.device && state.device.gatt && state.device.gatt.connected) ? state.device.gatt
+          : null;
+      if (gattToClose) {
+        gattToClose.disconnect();
         log('Disconnected GATT.', 'ok');
       }
     } catch (e) {
