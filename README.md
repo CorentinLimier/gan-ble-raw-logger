@@ -1,5 +1,11 @@
 # gan-ble-raw-logger
 
+> **Found an Android connectivity bug with this tool?** See
+> [`ANDROID-CONNECTIVITY-INVESTIGATION.md`](./ANDROID-CONNECTIVITY-INVESTIGATION.md)
+> for the full writeup: the symptom, everything tried (what worked and what
+> didn't), the retry mitigation shipped here, and the long-term fixes
+> (firmware update vs. native app) — written for the acubemy/GAN app dev team.
+
 A dependency-free (beyond two vendored, offline-bundled libraries) Web
 Bluetooth page built to answer two questions: **do BLE notifications from a
 GAN smart cube actually reach this browser, on this device, when it
