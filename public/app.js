@@ -463,7 +463,7 @@ import { CubeRenderer } from './cube3d.js';
       }
       state.mac = mac;
 
-      var MAX_ATTEMPTS = 3;
+      var MAX_ATTEMPTS = 8;
       var result = null;
       var lastError = null;
       for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -471,7 +471,7 @@ import { CubeRenderer } from './cube3d.js';
           log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ': fully tearing down and re-establishing the GATT connection before retrying (a stuck native BLE operation usually needs a fresh connection, not just a retried call)…', 'warn');
           state.intentionalDisconnect = true;
           try { if (device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e) {}
-          await sleep(1500);
+          await sleep(1000);
           state.intentionalDisconnect = false;
         }
         try {
@@ -537,13 +537,13 @@ import { CubeRenderer } from './cube3d.js';
    */
   async function establishGattSession(device, attemptLabel) {
     log('[attempt ' + attemptLabel + '] Connecting GATT…');
-    var gatt = await withTimeout(device.gatt.connect(), 15000, 'device.gatt.connect()');
+    var gatt = await withTimeout(device.gatt.connect(), 6000, 'device.gatt.connect()');
     log('[attempt ' + attemptLabel + '] GATT connected.', 'ok');
-    await sleep(500); // give the native BLE stack a moment before the next GATT op (Android stability)
+    await sleep(300); // give the native BLE stack a moment before the next GATT op (Android stability)
 
-    var services = await withTimeout(gatt.getPrimaryServices(), 15000, 'gatt.getPrimaryServices()');
+    var services = await withTimeout(gatt.getPrimaryServices(), 6000, 'gatt.getPrimaryServices()');
     log('[attempt ' + attemptLabel + '] Primary services found (' + services.length + '): ' + services.map(function (s) { return s.uuid; }).join(', '));
-    await sleep(500);
+    await sleep(300);
 
     var match = null;
     for (var i = 0; i < services.length; i++) {
@@ -557,12 +557,12 @@ import { CubeRenderer } from './cube3d.js';
 
     log('[attempt ' + attemptLabel + '] Matched protocol: ' + match.def.name + ' (service ' + match.def.service + ')', 'ok');
 
-    var stateChar = await withTimeout(match.service.getCharacteristic(match.def.state), 15000, 'getCharacteristic(state)');
-    await sleep(500);
+    var stateChar = await withTimeout(match.service.getCharacteristic(match.def.state), 6000, 'getCharacteristic(state)');
+    await sleep(300);
     var commandChar = null;
-    try { commandChar = await withTimeout(match.service.getCharacteristic(match.def.command), 15000, 'getCharacteristic(command)'); }
+    try { commandChar = await withTimeout(match.service.getCharacteristic(match.def.command), 6000, 'getCharacteristic(command)'); }
     catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
-    await sleep(500);
+    await sleep(300);
 
     log('State characteristic properties: ' + describeCharProperties(stateChar.properties));
     if (commandChar) log('Command characteristic properties: ' + describeCharProperties(commandChar.properties));
@@ -572,21 +572,22 @@ import { CubeRenderer } from './cube3d.js';
     // write inside startNotifications() will complete. These are separate from and
     // additional to that call, purely to narrow down where things actually break.
     try {
-      var descriptors = await withTimeout(stateChar.getDescriptors(), 8000, 'stateChar.getDescriptors()');
+      var descriptors = await withTimeout(stateChar.getDescriptors(), 3000, 'stateChar.getDescriptors()');
       log('State characteristic descriptors: ' + (descriptors.length ? descriptors.map(function (d) { return d.uuid; }).join(', ') : '(none found)'));
     } catch (e) {
       log('stateChar.getDescriptors() failed/timed out: ' + (e && e.message ? e.message : e), 'warn');
     }
-    await sleep(500);
+    await sleep(300);
 
+    // Observed across multiple attempts: readValue() and startNotifications() either both
+    // hang or both resolve quickly together — they seem to reflect one underlying "is this
+    // GATT link actually ready to carry data yet" state, not independent failure modes. So
+    // if the read probe hangs, fail this attempt fast instead of also waiting out a doomed
+    // startNotifications() call — that lets more reconnect attempts fit in the same budget.
     if (stateChar.properties.read) {
-      try {
-        var initialValue = await withTimeout(stateChar.readValue(), 8000, 'stateChar.readValue()');
-        log('Initial stateChar.readValue(): ' + bytesToHex(dataViewToBytes(initialValue)));
-      } catch (e) {
-        log('stateChar.readValue() failed/timed out: ' + (e && e.message ? e.message : e), 'warn');
-      }
-      await sleep(500);
+      var initialValue = await withTimeout(stateChar.readValue(), 3000, 'stateChar.readValue()');
+      log('Initial stateChar.readValue(): ' + bytesToHex(dataViewToBytes(initialValue)));
+      await sleep(300);
     } else {
       log('State characteristic does not advertise "read" — skipping pre-read probe.');
     }
@@ -595,7 +596,7 @@ import { CubeRenderer } from './cube3d.js';
     stateChar.addEventListener('characteristicvaluechanged', onNotification);
     log('[attempt ' + attemptLabel + '] Enabling notifications on state characteristic…');
     try {
-      await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications()');
+      await withTimeout(stateChar.startNotifications(), 3000, 'stateChar.startNotifications()');
     } catch (e) {
       stateChar.removeEventListener('characteristicvaluechanged', onNotification);
       throw e;
