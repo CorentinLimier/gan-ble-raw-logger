@@ -567,6 +567,30 @@ import { CubeRenderer } from './cube3d.js';
     log('State characteristic properties: ' + describeCharProperties(stateChar.properties));
     if (commandChar) log('Command characteristic properties: ' + describeCharProperties(commandChar.properties));
 
+    // Diagnostic probes: some Android BLE stacks need the CCCD descriptor explicitly
+    // discovered (or the characteristic read once) before the implicit descriptor
+    // write inside startNotifications() will complete. These are separate from and
+    // additional to that call, purely to narrow down where things actually break.
+    try {
+      var descriptors = await withTimeout(stateChar.getDescriptors(), 8000, 'stateChar.getDescriptors()');
+      log('State characteristic descriptors: ' + (descriptors.length ? descriptors.map(function (d) { return d.uuid; }).join(', ') : '(none found)'));
+    } catch (e) {
+      log('stateChar.getDescriptors() failed/timed out: ' + (e && e.message ? e.message : e), 'warn');
+    }
+    await sleep(500);
+
+    if (stateChar.properties.read) {
+      try {
+        var initialValue = await withTimeout(stateChar.readValue(), 8000, 'stateChar.readValue()');
+        log('Initial stateChar.readValue(): ' + bytesToHex(dataViewToBytes(initialValue)));
+      } catch (e) {
+        log('stateChar.readValue() failed/timed out: ' + (e && e.message ? e.message : e), 'warn');
+      }
+      await sleep(500);
+    } else {
+      log('State characteristic does not advertise "read" — skipping pre-read probe.');
+    }
+
     state.notifyCount = 0;
     stateChar.addEventListener('characteristicvaluechanged', onNotification);
     log('[attempt ' + attemptLabel + '] Enabling notifications on state characteristic…');
