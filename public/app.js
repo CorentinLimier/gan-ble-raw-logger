@@ -443,8 +443,15 @@ import { CubeRenderer } from './cube3d.js';
         resetUi();
       });
 
-      log('Attempting automatic MAC retrieval via watchAdvertisements() (up to 10s)…');
-      var mac = await tryAutoRetrieveMac(device, 10000);
+      var mac;
+      var prefilledManualMac = manualMacInput.value.trim();
+      if (prefilledManualMac) {
+        mac = prefilledManualMac;
+        log('Manual MAC field was pre-filled (' + mac + ') — skipping watchAdvertisements()/scanning entirely and connecting immediately. (Used to test whether the scan step itself interferes with the GATT session on some Android BLE stacks.)');
+      } else {
+        log('Attempting automatic MAC retrieval via watchAdvertisements() (up to 10s)…');
+        mac = await tryAutoRetrieveMac(device, 10000);
+      }
       if (!mac) {
         var manual = manualMacInput.value.trim();
         if (manual) {
