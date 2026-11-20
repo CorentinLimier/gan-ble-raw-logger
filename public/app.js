@@ -294,7 +294,8 @@ import { CubeRenderer } from './cube3d.js';
     notifyCount: 0,
     moveCount: 0,
     cubeState: window.GanProtocol.solvedState(),
-    cubeStateSynced: false
+    cubeStateSynced: false,
+    intentionalDisconnect: false
   };
 
   function resetUi() {
@@ -430,6 +431,7 @@ import { CubeRenderer } from './cube3d.js';
       deviceInfoEl.textContent = device.name + ' (' + device.id + ')';
 
       device.addEventListener('gattserverdisconnected', function () {
+        if (state.intentionalDisconnect) return; // our own retry/disconnect logic already handles its own state
         log('gattserverdisconnected event fired (cube/phone dropped the connection)', 'warn');
         resetUi();
       });
@@ -447,35 +449,31 @@ import { CubeRenderer } from './cube3d.js';
       }
       state.mac = mac;
 
-      log('Connecting GATT…');
-      var gatt = await withTimeout(device.gatt.connect(), 15000, 'device.gatt.connect()');
-      state.gatt = gatt;
-      log('GATT connected.', 'ok');
-      await sleep(300); // give the native BLE stack a moment before the next GATT op (Android stability)
-
-      var services = await withTimeout(gatt.getPrimaryServices(), 15000, 'gatt.getPrimaryServices()');
-      log('Primary services found (' + services.length + '): ' + services.map(function (s) { return s.uuid; }).join(', '));
-      await sleep(300);
-
-      var match = null;
-      for (var i = 0; i < services.length; i++) {
-        var uuid = services[i].uuid.toLowerCase();
-        for (var j = 0; j < GEN_SERVICES.length; j++) {
-          if (uuid === GEN_SERVICES[j].service) { match = { service: services[i], def: GEN_SERVICES[j] }; break; }
+      var MAX_ATTEMPTS = 3;
+      var result = null;
+      var lastError = null;
+      for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ': fully tearing down and re-establishing the GATT connection before retrying (a stuck native BLE operation usually needs a fresh connection, not just a retried call)…', 'warn');
+          state.intentionalDisconnect = true;
+          try { if (device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e) {}
+          await sleep(1500);
+          state.intentionalDisconnect = false;
         }
-        if (match) break;
+        try {
+          result = await establishGattSession(device, attempt);
+          break;
+        } catch (e) {
+          lastError = e;
+          log('Attempt ' + attempt + '/' + MAX_ATTEMPTS + ' failed: ' + (e && e.message ? e.message : e), 'error');
+        }
       }
-      if (!match) throw new Error('None of the known GAN service UUIDs (Gen2/Gen3/Gen4) were found among the primary services. This cube/firmware may use an unrecognized protocol variant.');
+      if (!result) {
+        throw lastError || new Error('Failed to establish GATT session after ' + MAX_ATTEMPTS + ' attempts.');
+      }
 
-      log('Matched protocol: ' + match.def.name + ' (service ' + match.def.service + ')', 'ok');
-
-      var stateChar = await withTimeout(match.service.getCharacteristic(match.def.state), 15000, 'getCharacteristic(state)');
-      await sleep(300);
-      var commandChar = null;
-      try { commandChar = await withTimeout(match.service.getCharacteristic(match.def.command), 15000, 'getCharacteristic(command)'); }
-      catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
-      await sleep(300);
-
+      var match = result.match, stateChar = result.stateChar, commandChar = result.commandChar;
+      state.gatt = device.gatt;
       state.stateChar = stateChar;
       state.commandChar = commandChar;
       state.gen = match.def.name;
@@ -485,9 +483,6 @@ import { CubeRenderer } from './cube3d.js';
       state.cubeStateSynced = false;
       infoMoveCount.textContent = '0';
       CubeRenderer.setFacelets(null);
-
-      log('State characteristic properties: ' + JSON.stringify(stateChar.properties));
-      if (commandChar) log('Command characteristic properties: ' + JSON.stringify(commandChar.properties));
 
       if (mac) {
         var salt = macToSalt(mac);
@@ -500,18 +495,6 @@ import { CubeRenderer } from './cube3d.js';
           log('MAC "' + mac + '" is not a valid 6-byte MAC address, ignoring it.', 'warn');
         }
       }
-
-      state.notifyCount = 0;
-      stateChar.addEventListener('characteristicvaluechanged', onNotification);
-      log('Enabling notifications on state characteristic…');
-      try {
-        await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications()');
-      } catch (e) {
-        log('startNotifications() stalled/failed first try (' + (e && e.message ? e.message : e) + '), retrying once after a short delay…', 'warn');
-        await sleep(500);
-        await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications() [retry]');
-      }
-      log('startNotifications() succeeded on state characteristic. Now turn a face on the cube — every notification received will be logged below.', 'ok');
 
       setStatus('Connected (' + match.def.name + ')', 'connected');
       disconnectBtn.disabled = false;
@@ -530,6 +513,58 @@ import { CubeRenderer } from './cube3d.js';
       setStatus('Error', 'error');
       connectBtn.disabled = false;
     }
+  }
+
+  /**
+   * One full attempt at: GATT connect -> discover service/characteristics ->
+   * enable notifications. Pulled out of connect() so a stalled native BLE
+   * operation can be retried from a clean, fully reconnected GATT session
+   * rather than just re-issuing the same stuck call on the same connection.
+   */
+  async function establishGattSession(device, attemptLabel) {
+    log('[attempt ' + attemptLabel + '] Connecting GATT…');
+    var gatt = await withTimeout(device.gatt.connect(), 15000, 'device.gatt.connect()');
+    log('[attempt ' + attemptLabel + '] GATT connected.', 'ok');
+    await sleep(500); // give the native BLE stack a moment before the next GATT op (Android stability)
+
+    var services = await withTimeout(gatt.getPrimaryServices(), 15000, 'gatt.getPrimaryServices()');
+    log('[attempt ' + attemptLabel + '] Primary services found (' + services.length + '): ' + services.map(function (s) { return s.uuid; }).join(', '));
+    await sleep(500);
+
+    var match = null;
+    for (var i = 0; i < services.length; i++) {
+      var uuid = services[i].uuid.toLowerCase();
+      for (var j = 0; j < GEN_SERVICES.length; j++) {
+        if (uuid === GEN_SERVICES[j].service) { match = { service: services[i], def: GEN_SERVICES[j] }; break; }
+      }
+      if (match) break;
+    }
+    if (!match) throw new Error('None of the known GAN service UUIDs (Gen2/Gen3/Gen4) were found among the primary services. This cube/firmware may use an unrecognized protocol variant.');
+
+    log('[attempt ' + attemptLabel + '] Matched protocol: ' + match.def.name + ' (service ' + match.def.service + ')', 'ok');
+
+    var stateChar = await withTimeout(match.service.getCharacteristic(match.def.state), 15000, 'getCharacteristic(state)');
+    await sleep(500);
+    var commandChar = null;
+    try { commandChar = await withTimeout(match.service.getCharacteristic(match.def.command), 15000, 'getCharacteristic(command)'); }
+    catch (e) { log('Could not get command characteristic (move-history recovery / commands will be unavailable): ' + e, 'warn'); }
+    await sleep(500);
+
+    log('State characteristic properties: ' + JSON.stringify(stateChar.properties));
+    if (commandChar) log('Command characteristic properties: ' + JSON.stringify(commandChar.properties));
+
+    state.notifyCount = 0;
+    stateChar.addEventListener('characteristicvaluechanged', onNotification);
+    log('[attempt ' + attemptLabel + '] Enabling notifications on state characteristic…');
+    try {
+      await withTimeout(stateChar.startNotifications(), 8000, 'stateChar.startNotifications()');
+    } catch (e) {
+      stateChar.removeEventListener('characteristicvaluechanged', onNotification);
+      throw e;
+    }
+    log('[attempt ' + attemptLabel + '] startNotifications() succeeded on state characteristic. Now turn a face on the cube — every notification received will be logged below.', 'ok');
+
+    return { match: match, stateChar: stateChar, commandChar: commandChar };
   }
 
   async function onNotification(evt) {
@@ -558,6 +593,7 @@ import { CubeRenderer } from './cube3d.js';
 
   async function disconnect() {
     try {
+      state.intentionalDisconnect = true;
       if (state.advAbort) { try { state.advAbort.abort(); } catch (e) {} }
       if (state.stateChar) {
         try { await state.stateChar.stopNotifications(); } catch (e) {}
@@ -576,6 +612,7 @@ import { CubeRenderer } from './cube3d.js';
       state.commandChar = null;
       state.driver = null;
       state.keyIv = null;
+      state.intentionalDisconnect = false;
       resetUi();
     }
   }
