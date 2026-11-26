@@ -184,6 +184,10 @@ reference implementation.
    on. This is a substantial rewrite compared to the current web app, and is
    only likely worth it if this affects a meaningful share of your Android
    user base.
+   [`gan-ble-native-test`](https://github.com/CorentinLimier/gan-ble-native-test)
+   is a minimal native test harness built specifically to check whether
+   these native-only controls actually change the hang rate on the affected
+   phone, before committing to a full rewrite.
 
 ## Suggested next steps for acubemy
 
