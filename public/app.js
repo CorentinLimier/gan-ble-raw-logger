@@ -314,36 +314,73 @@ import { CubeRenderer } from './cube3d.js';
     resetCubeBtn.disabled = true;
   }
 
-  async function tryAutoRetrieveMac(device, timeoutMs) {
+  /**
+   * Scans advertisements for the full window and collects every DISTINCT MAC
+   * address seen, rather than stopping at the first one. Some devices report
+   * more than one MAC across advertisements for what looks like the same
+   * cube (see https://github.com/cs0x7f/cstimer/issues/480 — cstimer users
+   * hit exactly this with a GAN cube on Android, and picking the "other" MAC
+   * fixed it), so surfacing all of them lets the user pick/correct it rather
+   * than silently trusting whichever one happened to arrive first.
+   */
+  async function collectAdvertisedMacs(device, timeoutMs) {
     if (typeof device.watchAdvertisements !== 'function') {
       log('device.watchAdvertisements() is not supported by this browser — cannot auto-retrieve MAC. On Android Chrome this often requires enabling "Experimental Web Platform features" in chrome://flags. Use the manual MAC field if you have it (e.g. via a BLE scanner app).', 'warn');
-      return null;
+      return [];
     }
     return new Promise(function (resolve) {
       var abortController = new AbortController();
       state.advAbort = abortController;
-      var resolved = false;
-      var finish = function (mac) {
-        if (resolved) return;
-        resolved = true;
+      var finished = false;
+      var seen = []; // ordered, first-seen-first, de-duplicated
+      var finish = function () {
+        if (finished) return;
+        finished = true;
         try { abortController.abort(); } catch (e) {}
-        resolve(mac);
+        resolve(seen);
       };
       device.addEventListener('advertisementreceived', function onAdv(evt) {
         log('advertisementreceived: rssi=' + evt.rssi + ' txPower=' + evt.txPower + ' name=' + evt.name, 'evt');
         logManufacturerData(evt.manufacturerData);
         var mac = extractMAC(evt.manufacturerData);
-        if (mac && !resolved) {
-          log('Extracted MAC from advertisement: ' + mac, 'ok');
-          finish(mac);
+        if (mac && seen.indexOf(mac) === -1) {
+          seen.push(mac);
+          log('Extracted MAC from advertisement: ' + mac + (seen.length > 1 ? ' (distinct from ' + (seen.length - 1) + ' previously seen MAC(s) for this device!)' : ''), seen.length > 1 ? 'warn' : 'ok');
         }
       });
       device.watchAdvertisements({ signal: abortController.signal }).catch(function (e) {
         log('watchAdvertisements() failed: ' + e, 'warn');
-        finish(null);
+        finish();
       });
-      setTimeout(function () { finish(null); }, timeoutMs || 10000);
+      setTimeout(finish, timeoutMs || 4000);
     });
+  }
+
+  /**
+   * Shows the user a confirmation prompt listing every MAC address we
+   * auto-detected (zero, one, or several) and lets them accept, pick a
+   * different one, or type one in manually.
+   */
+  function promptForMac(detectedMacs) {
+    var message;
+    var defaultValue;
+    if (detectedMacs.length === 0) {
+      message = 'No MAC address could be auto-detected from the cube\'s advertisements.\n\n'
+        + 'Enter it manually if you have it (e.g. from a BLE scanner app), or leave blank to skip decoding and only log raw bytes.';
+      defaultValue = '';
+    } else if (detectedMacs.length === 1) {
+      message = 'Auto-detected MAC address from the cube\'s advertisements:\n\n  ' + detectedMacs[0]
+        + '\n\nConfirm it, or type a different one if you know it\'s wrong.';
+      defaultValue = detectedMacs[0];
+    } else {
+      message = 'Detected ' + detectedMacs.length + ' DIFFERENT MAC addresses advertised for this device:\n\n'
+        + detectedMacs.map(function (m, i) { return '  ' + (i + 1) + ') ' + m; }).join('\n')
+        + '\n\nThis can happen on some Android devices (see cstimer issue #480) — if the wrong one is used, decoding will be garbage or the cube won\'t respond correctly. '
+        + 'Pick one by typing it exactly as shown above, or try the first one and switch if it doesn\'t work.';
+      defaultValue = detectedMacs[0];
+    }
+    var result = window.prompt(message, defaultValue);
+    return result === null ? defaultValue : result.trim();
   }
 
   // ---------------------------------------------------------------------
@@ -452,17 +489,11 @@ import { CubeRenderer } from './cube3d.js';
         mac = prefilledManualMac;
         log('Manual MAC field was pre-filled (' + mac + ') — skipping watchAdvertisements()/scanning entirely and connecting immediately. (Used to test whether the scan step itself interferes with the GATT session on some Android BLE stacks.)');
       } else {
-        log('Attempting automatic MAC retrieval via watchAdvertisements() (up to 10s)…');
-        mac = await tryAutoRetrieveMac(device, 10000);
-      }
-      if (!mac) {
-        var manual = manualMacInput.value.trim();
-        if (manual) {
-          mac = manual;
-          log('Using manually entered MAC: ' + mac);
-        } else {
-          log('No MAC available — decryption/decoding/3D view will be skipped, raw notification bytes will still be logged.', 'warn');
-        }
+        log('Scanning advertisements for up to 4s to collect every MAC address this device reports…');
+        var detectedMacs = await collectAdvertisedMacs(device, 4000);
+        log('Detected ' + detectedMacs.length + ' distinct MAC address(es): ' + (detectedMacs.length ? detectedMacs.join(', ') : '(none)'));
+        mac = promptForMac(detectedMacs);
+        log(mac ? ('Using MAC address: ' + mac + (detectedMacs.indexOf(mac) === -1 ? ' (manually entered, not one of the auto-detected ones)' : '')) : 'No MAC provided — decryption/decoding/3D view will be skipped, raw notification bytes will still be logged.', mac ? 'ok' : 'warn');
       }
       state.mac = mac;
 

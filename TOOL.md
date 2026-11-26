@@ -74,18 +74,28 @@ to keep the surface for bugs small while isolating whether the
 
 ### MAC / decryption
 
-GAN cubes salt their AES key/iv with the device's BLE MAC address. Some
-browsers expose this automatically via `watchAdvertisements()` (the page
-tries this for up to 10s after you pick the device); on Android Chrome this
-API has historically required enabling **Experimental Web Platform
-features** in `chrome://flags`. If auto-detection fails, you can paste a
-MAC manually (e.g. read from a generic BLE scanner app like nRF Connect)
-into the "Manual MAC fallback" field before connecting. If no MAC is
-available at all, raw bytes are still logged — decryption is purely a
-bonus for making the payload more legible, it is not required to prove
-notifications are arriving. If the field is pre-filled before connecting,
-the page also skips the `watchAdvertisements()` scan entirely and connects
-immediately — useful both as a faster path once you know the MAC, and as a
+GAN cubes salt their AES key/iv with the device's BLE MAC address. After you
+pick the cube, the page scans its advertisements for up to 4s and collects
+every **distinct** MAC address it sees (not just the first one), then shows
+a confirmation popup listing whatever it found — zero, one, or several — so
+you can accept it, pick a different one, or type one in manually (e.g. read
+from a generic BLE scanner app like nRF Connect). This exists because at
+least one other cube app has hit cases where more than one MAC address
+appears to be advertised for what looks like the same physical cube (see
+[cstimer#480](https://github.com/cs0x7f/cstimer/issues/480)), which silently
+breaks decoding if the wrong one gets used — the popup surfaces that instead
+of guessing. Leaving the popup blank skips decoding; raw bytes are still
+logged either way, since decryption is a bonus for legibility, not required
+to prove notifications are arriving.
+
+On Android Chrome, auto-detection via `watchAdvertisements()` has
+historically required enabling **Experimental Web Platform features** in
+`chrome://flags`; if it's unsupported, the popup just shows "no MAC
+detected" and you can type one in.
+
+If the "Manual MAC fallback" field is pre-filled *before* clicking Connect,
+the page skips scanning and the popup entirely and connects immediately —
+useful both as a faster path once you already know the MAC, and as a
 diagnostic (see the investigation doc).
 
 ## Deployment
